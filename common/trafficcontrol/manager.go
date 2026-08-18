@@ -28,7 +28,18 @@ type ConnectionEvent struct {
 	ClosedAt time.Time
 }
 
-const closedConnectionsLimit = 1000
+type TrafficCounters struct {
+	UploadBytes   atomic.Int64
+	DownloadBytes atomic.Int64
+}
+
+type ConnectionObserver interface {
+	TrafficCounters(metadata TrackerMetadata) *TrafficCounters
+	ConnectionOpened(metadata TrackerMetadata)
+	ConnectionClosed(metadata TrackerMetadata)
+}
+
+const defaultClosedConnectionsLimit = 1000
 
 var (
 	_ adapter.ConnectionTracker = (*Manager)(nil)
@@ -43,16 +54,20 @@ type Manager struct {
 	connections             compatible.Map[uuid.UUID, Tracker]
 	closedConnectionsAccess sync.Mutex
 	closedConnections       list.List[TrackerMetadata]
+	closedConnectionsLimit  int
 
 	eventSubscriber *observable.Subscriber[ConnectionEvent]
 	eventObserver   *observable.Observer[ConnectionEvent]
+	observerAccess  sync.RWMutex
+	observer        ConnectionObserver
 	cleaner         *cleanup.Cleaner
 }
 
 func NewManager(outbound adapter.OutboundManager) *Manager {
 	return &Manager{
-		outbound:        outbound,
-		eventSubscriber: observable.NewSubscriber[ConnectionEvent](256),
+		outbound:               outbound,
+		closedConnectionsLimit: defaultClosedConnectionsLimit,
+		eventSubscriber:        observable.NewSubscriber[ConnectionEvent](256),
 	}
 }
 
@@ -86,9 +101,41 @@ func (m *Manager) UnSubscribeEvents(subscription observable.Subscription[Connect
 	m.eventObserver.UnSubscribe(subscription)
 }
 
+func (m *Manager) SetConnectionObserver(observer ConnectionObserver) {
+	m.observerAccess.Lock()
+	m.observer = observer
+	m.observerAccess.Unlock()
+}
+
+func (m *Manager) SetClosedConnectionsLimit(limit int) {
+	if limit < 0 {
+		limit = 0
+	}
+	m.closedConnectionsAccess.Lock()
+	m.closedConnectionsLimit = limit
+	for m.closedConnections.Len() > limit {
+		m.closedConnections.PopFront()
+	}
+	m.closedConnectionsAccess.Unlock()
+}
+
+func (m *Manager) trafficCounters(metadata TrackerMetadata) *TrafficCounters {
+	m.observerAccess.RLock()
+	defer m.observerAccess.RUnlock()
+	if m.observer == nil {
+		return nil
+	}
+	return m.observer.TrafficCounters(metadata)
+}
+
 func (m *Manager) join(tracker Tracker) {
 	metadata := tracker.Metadata()
 	m.connections.Store(metadata.ID, tracker)
+	m.observerAccess.RLock()
+	if m.observer != nil {
+		m.observer.ConnectionOpened(*metadata)
+	}
+	m.observerAccess.RUnlock()
 	m.eventSubscriber.Emit(ConnectionEvent{
 		Type:     ConnectionEventNew,
 		ID:       metadata.ID,
@@ -106,11 +153,18 @@ func (m *Manager) leave(tracker Tracker) {
 	metadata.ClosedAt = closedAt
 	metadataCopy := *metadata
 	m.closedConnectionsAccess.Lock()
-	if m.closedConnections.Len() >= closedConnectionsLimit {
+	if m.closedConnectionsLimit > 0 && m.closedConnections.Len() >= m.closedConnectionsLimit {
 		m.closedConnections.PopFront()
 	}
-	m.closedConnections.PushBack(metadataCopy)
+	if m.closedConnectionsLimit > 0 {
+		m.closedConnections.PushBack(metadataCopy)
+	}
 	m.closedConnectionsAccess.Unlock()
+	m.observerAccess.RLock()
+	if m.observer != nil {
+		m.observer.ConnectionClosed(metadataCopy)
+	}
+	m.observerAccess.RUnlock()
 	m.eventSubscriber.Emit(ConnectionEvent{
 		Type:     ConnectionEventClosed,
 		ID:       metadata.ID,
