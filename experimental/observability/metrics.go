@@ -33,7 +33,7 @@ func (m *Manager) writePrometheus(writer io.Writer) error {
 	fmt.Fprintf(output, "singbox_build_info{version=\"%s\",go_version=\"%s\",os=\"%s\",arch=\"%s\"} 1\n", prometheusEscape(status.Version), prometheusEscape(runtime.Version()), runtime.GOOS, runtime.GOARCH)
 	writeHelpAndType(output, "singbox_uptime_seconds", "Time since the observability service started.", "gauge")
 	writeFloatMetric(output, "singbox_uptime_seconds", status.UptimeSeconds)
-	writeHelpAndType(output, "singbox_memory_bytes", "Physical memory currently used by the Go runtime.", "gauge")
+	writeHelpAndType(output, "singbox_memory_bytes", "Memory obtained from the OS and currently retained by the Go runtime.", "gauge")
 	writeIntegerMetric(output, "singbox_memory_bytes", int64(status.MemoryBytes))
 	writeHelpAndType(output, "singbox_goroutines", "Current number of goroutines.", "gauge")
 	writeIntegerMetric(output, "singbox_goroutines", int64(status.Goroutines))
@@ -47,6 +47,8 @@ func (m *Manager) writePrometheus(writer io.Writer) error {
 	writeIntegerMetric(output, "singbox_traffic_download_bytes_total", status.DownloadBytesTotal)
 	writeHelpAndType(output, "singbox_recent_connections", "Closed connections currently retained in memory.", "gauge")
 	writeIntegerMetric(output, "singbox_recent_connections", int64(status.RecentConnections))
+	writeHelpAndType(output, "singbox_recent_connections_capacity", "Configured maximum number of closed connections retained in memory.", "gauge")
+	writeIntegerMetric(output, "singbox_recent_connections_capacity", int64(status.RecentConnectionLimit))
 
 	statistics := m.statisticsSnapshot()
 	writeHelpAndType(output, "singbox_outbound_connections_active", "Current active connections grouped by outbound chain.", "gauge")
@@ -76,7 +78,28 @@ func (m *Manager) writePrometheus(writer io.Writer) error {
 	for _, item := range urlTests {
 		writeLabeledIntegerMetric(output, "singbox_outbound_urltest_timestamp_seconds", item.name, item.timestamp)
 	}
+	m.writeAPIMetrics(output)
 	return output.Flush()
+}
+
+func (m *Manager) writeAPIMetrics(writer io.Writer) {
+	samples := m.apiMetrics.snapshot()
+	writeHelpAndType(writer, "singbox_observability_http_requests_total", "Observability API requests grouped by endpoint and HTTP status.", "counter")
+	for _, sample := range samples {
+		fmt.Fprintf(writer, "singbox_observability_http_requests_total{%s} %d\n", apiMetricLabels(sample), sample.value.requests)
+	}
+	writeHelpAndType(writer, "singbox_observability_http_response_bytes_total", "Observability API response bytes grouped by endpoint and HTTP status.", "counter")
+	for _, sample := range samples {
+		fmt.Fprintf(writer, "singbox_observability_http_response_bytes_total{%s} %d\n", apiMetricLabels(sample), sample.value.bytes)
+	}
+	writeHelpAndType(writer, "singbox_observability_http_request_duration_seconds_total", "Total observability API request duration grouped by endpoint and HTTP status.", "counter")
+	for _, sample := range samples {
+		fmt.Fprintf(writer, "singbox_observability_http_request_duration_seconds_total{%s} %s\n", apiMetricLabels(sample), strconv.FormatFloat(sample.value.duration.Seconds(), 'f', 6, 64))
+	}
+	writeHelpAndType(writer, "singbox_observability_sse_subscribers", "Current observability event stream subscribers.", "gauge")
+	writeIntegerMetric(writer, "singbox_observability_sse_subscribers", m.apiMetrics.sseSubscribers.Load())
+	writeHelpAndType(writer, "singbox_observability_sse_events_total", "Connection events sent to observability event stream subscribers.", "counter")
+	writeIntegerMetric(writer, "singbox_observability_sse_events_total", int64(m.apiMetrics.sseEvents.Load()))
 }
 
 func (m *Manager) writeConnectionDimensionMetrics(writer io.Writer, kind string, prefix string) {

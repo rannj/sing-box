@@ -130,6 +130,7 @@ All paths below are relative to `/observability/v1` and use `GET`.
 | Path | Content | Description |
 |------|---------|-------------|
 | `/` | JSON | API version and endpoint list |
+| `/capabilities` | JSON | Limits, dimensions and supported API behavior |
 | `/metrics` | Prometheus text | Runtime gauges and counters |
 | `/status` | JSON | Version, uptime, memory, active connections and limits |
 | `/connections/active` | JSON | Current connections, newest first |
@@ -137,15 +138,31 @@ All paths below are relative to `/observability/v1` and use `GET`.
 | `/top` | JSON | Top values from retained connections |
 | `/events` | Server-Sent Events | Open and close events with keepalive comments |
 
+Errors contain both the legacy top-level `message` and a stable `error` object
+with `code`, `message`, and, when applicable, `parameter` and `maximum`.
+
+### Connection pagination
+
+Both connection endpoints return `data`, `total`, `hasMore` and, when another
+page exists, `nextCursor`. Active connections accept at most 500 rows per
+request:
+
+```text
+/connections/active?limit=100
+/connections/active?limit=100&cursor=<nextCursor>
+```
+
 ### Recent connections
 
 ```text
-/connections/recent?window=30m&limit=100&offset=0
+/connections/recent?window=30m&limit=100
+/connections/recent?window=30m&limit=100&cursor=<nextCursor>
 ```
 
-`window` cannot exceed `recent_ttl`. The response has `data` and `total` fields.
-The result is newest first. `total` is limited to the in-memory ring, not all
-connections since the process started.
+`window` cannot exceed `recent_ttl`. The result is newest first. `total` is
+limited to the in-memory ring, not all connections since the process started.
+The older `offset` parameter remains available for compatibility, but cursor
+pagination avoids duplicate or skipped rows while new connections arrive.
 
 ### Top-K
 
@@ -167,8 +184,10 @@ curl -N \
   'http://127.0.0.1:9090/observability/v1/events?heartbeat=15s'
 ```
 
-Events use `event: open` or `event: close` and a JSON `data` line. This stream
-is intentionally not persisted by sing-box. A collector can write it to Loki,
+Events include a monotonic `id`, use `event: open` or `event: close`, and carry
+a JSON `data` line. The ID is useful for ordering and detecting gaps, but the
+stream is not replayable and `Last-Event-ID` is not supported. This stream is
+intentionally not persisted by sing-box. A collector can write it to Loki,
 ClickHouse or another event store when exact long-term connection history is
 required.
 
@@ -199,7 +218,9 @@ The exporter exposes bounded metrics including:
 - `singbox_outbound_*` counters and gauges labelled only by outbound chain;
 - `singbox_inbound_connections_*` and `singbox_network_connections_*`;
 - latest outbound URL test delay and timestamp gauges;
-- `singbox_recent_connections`.
+- `singbox_recent_connections` and `singbox_recent_connections_capacity`;
+- `singbox_observability_http_*` API request, response-size and duration
+  counters, plus current SSE subscribers and sent events.
 
 Use `rate()` or `increase()` for counters:
 

@@ -13,6 +13,7 @@ const (
 	DefaultTopKSize          = 100
 	MaxRecentConnections     = 100000
 	MaxTopKSize              = 1000
+	MaxActivePageSize        = 500
 )
 
 type Service interface {
@@ -44,8 +45,10 @@ type Connection struct {
 }
 
 type ConnectionPage struct {
-	Data  []Connection `json:"data"`
-	Total int          `json:"total"`
+	Data       []Connection `json:"data"`
+	Total      int          `json:"total"`
+	NextCursor string       `json:"nextCursor,omitempty"`
+	HasMore    bool         `json:"hasMore"`
 }
 
 type Dimension struct {
@@ -79,6 +82,34 @@ type Status struct {
 }
 
 type Event struct {
+	ID         uint64     `json:"id"`
 	Type       string     `json:"type"`
 	Connection Connection `json:"connection"`
+}
+
+type Capabilities struct {
+	APIVersion          int      `json:"apiVersion"`
+	Endpoints           []string `json:"endpoints"`
+	TopDimensions       []string `json:"topDimensions"`
+	SensitiveDimensions []string `json:"sensitiveDimensions"`
+	ExposeSensitive     bool     `json:"exposeSensitive"`
+	RecentLimit         int      `json:"recentLimit"`
+	RecentTTL           string   `json:"recentTTL"`
+	TopKLimit           int      `json:"topKLimit"`
+	ActivePageLimit     int      `json:"activePageLimit"`
+	CursorPagination    bool     `json:"cursorPagination"`
+	EventReplay         bool     `json:"eventReplay"`
+}
+
+type APIError struct {
+	Error APIErrorDetail `json:"error"`
+	// Message preserves compatibility with clients using the original response.
+	Message string `json:"message"`
+}
+
+type APIErrorDetail struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Parameter string `json:"parameter,omitempty"`
+	Maximum   string `json:"maximum,omitempty"`
 }

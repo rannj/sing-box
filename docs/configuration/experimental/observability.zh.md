@@ -115,6 +115,7 @@ TLS 配置启用后，也会保护可观测性接口。
 | 路径 | 内容 | 说明 |
 |------|------|------|
 | `/` | JSON | API 版本和接口列表 |
+| `/capabilities` | JSON | 容量限制、维度和支持的 API 行为 |
 | `/metrics` | Prometheus 文本 | 运行时 gauge 和 counter |
 | `/status` | JSON | 版本、运行时间、内存、活跃连接和容量限制 |
 | `/connections/active` | JSON | 当前连接，按最新启动时间排序 |
@@ -122,14 +123,29 @@ TLS 配置启用后，也会保护可观测性接口。
 | `/top` | JSON | 内存连接中的 Top-K |
 | `/events` | Server-Sent Events | 开启/关闭事件和 keepalive 注释 |
 
+错误响应同时保留旧版顶层 `message`，并提供稳定的 `error` 对象，其中包含
+`code`、`message`，适用时还包含 `parameter` 和 `maximum`。
+
+### 连接分页
+
+两个连接接口均返回 `data`、`total`、`hasMore`，还有存在下一页时返回的
+`nextCursor`。活跃连接单次最多返回 500 条：
+
+```text
+/connections/active?limit=100
+/connections/active?limit=100&cursor=<nextCursor>
+```
+
 ### 近期连接
 
 ```text
-/connections/recent?window=30m&limit=100&offset=0
+/connections/recent?window=30m&limit=100
+/connections/recent?window=30m&limit=100&cursor=<nextCursor>
 ```
 
-`window` 不能超过 `recent_ttl`。响应包含 `data` 和 `total`，结果按最新优先。
-`total` 只代表内存连接环中的数量，不代表进程启动以来的全部连接。
+`window` 不能超过 `recent_ttl`，结果按最新优先。`total` 只代表内存连接环中的
+数量，不代表进程启动以来的全部连接。旧的 `offset` 参数仍可兼容使用，但游标
+分页能避免翻页期间新增连接造成重复或遗漏。
 
 ### Top-K
 
@@ -150,9 +166,10 @@ curl -N \
   'http://127.0.0.1:9090/observability/v1/events?heartbeat=15s'
 ```
 
-事件使用 `event: open` 或 `event: close`，并附带 JSON `data` 行。sing-box 不会
-持久化事件；需要精确的长期连接历史时，可以由外部 collector 写入 Loki、
-ClickHouse 或其他事件存储。
+事件包含单调递增的 `id`，使用 `event: open` 或 `event: close`，并附带 JSON
+`data` 行。ID 可用于排序和检测缺口，但事件流不支持重放，也不支持
+`Last-Event-ID`。sing-box 不会持久化事件；需要精确的长期连接历史时，可以由
+外部 collector 写入 Loki、ClickHouse 或其他事件存储。
 
 ## Prometheus
 
@@ -181,7 +198,9 @@ scrape_configs:
 - 只使用 outbound chain 标签的 `singbox_outbound_*` 指标；
 - `singbox_inbound_connections_*` 和 `singbox_network_connections_*`；
 - 最新 outbound URLTest 延迟和时间戳 gauge；
-- `singbox_recent_connections`。
+- `singbox_recent_connections` 和 `singbox_recent_connections_capacity`；
+- `singbox_observability_http_*` API 请求、响应大小和耗时 counter，以及当前
+  SSE 订阅者和已发送事件数。
 
 Counter 使用 `rate()` 或 `increase()`：
 

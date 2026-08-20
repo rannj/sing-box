@@ -22,6 +22,7 @@ const (
 )
 
 type ConnectionEvent struct {
+	Sequence uint64
 	Type     ConnectionEventType
 	ID       uuid.UUID
 	Metadata *TrackerMetadata
@@ -58,6 +59,8 @@ type Manager struct {
 
 	eventSubscriber *observable.Subscriber[ConnectionEvent]
 	eventObserver   *observable.Observer[ConnectionEvent]
+	eventEmitAccess sync.Mutex
+	eventSequence   atomic.Uint64
 	observerAccess  sync.RWMutex
 	observer        ConnectionObserver
 	cleaner         *cleanup.Cleaner
@@ -136,7 +139,7 @@ func (m *Manager) join(tracker Tracker) {
 		m.observer.ConnectionOpened(*metadata)
 	}
 	m.observerAccess.RUnlock()
-	m.eventSubscriber.Emit(ConnectionEvent{
+	m.emitEvent(ConnectionEvent{
 		Type:     ConnectionEventNew,
 		ID:       metadata.ID,
 		Metadata: metadata,
@@ -165,12 +168,19 @@ func (m *Manager) leave(tracker Tracker) {
 		m.observer.ConnectionClosed(metadataCopy)
 	}
 	m.observerAccess.RUnlock()
-	m.eventSubscriber.Emit(ConnectionEvent{
+	m.emitEvent(ConnectionEvent{
 		Type:     ConnectionEventClosed,
 		ID:       metadata.ID,
 		Metadata: &metadataCopy,
 		ClosedAt: closedAt,
 	})
+}
+
+func (m *Manager) emitEvent(event ConnectionEvent) {
+	m.eventEmitAccess.Lock()
+	event.Sequence = m.eventSequence.Add(1)
+	m.eventSubscriber.Emit(event)
+	m.eventEmitAccess.Unlock()
 }
 
 func (m *Manager) Total() (uplinkTotal int64, downlinkTotal int64) {

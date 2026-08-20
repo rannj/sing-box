@@ -50,3 +50,26 @@ func TestClosedConnectionsLimit(t *testing.T) {
 	require.Len(t, closed, 1)
 	require.Equal(t, ids[2], closed[0].ID)
 }
+
+func TestConnectionEventSequence(t *testing.T) {
+	manager := NewManager(nil)
+	require.NoError(t, manager.Start(adapter.StartStateInitialize))
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	subscription, _, err := manager.SubscribeEvents()
+	require.NoError(t, err)
+	defer manager.UnSubscribeEvents(subscription)
+
+	tracker := &testTracker{metadata: TrackerMetadata{
+		ID:       uuid.Must(uuid.NewV4()),
+		Upload:   new(atomic.Int64),
+		Download: new(atomic.Int64),
+	}}
+	manager.join(tracker)
+	manager.leave(tracker)
+	opened := <-subscription
+	closed := <-subscription
+	require.Equal(t, ConnectionEventNew, opened.Type)
+	require.Equal(t, ConnectionEventClosed, closed.Type)
+	require.Greater(t, opened.Sequence, uint64(0))
+	require.Equal(t, opened.Sequence+1, closed.Sequence)
+}

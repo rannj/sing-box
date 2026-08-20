@@ -2,11 +2,13 @@ package observability
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -90,6 +92,103 @@ func TestConfigurationLimits(t *testing.T) {
 		TopKSize: MaxTopKSize + 1,
 	})
 	require.Error(t, err)
+}
+
+func TestConnectionCursorPagination(t *testing.T) {
+	now := time.Now()
+	connections := []Connection{
+		{ID: "c", ClosedAt: now},
+		{ID: "b", ClosedAt: now.Add(-time.Second)},
+		{ID: "a", ClosedAt: now.Add(-2 * time.Second)},
+	}
+	first, err := paginateConnections(connections, "", 0, 2, true)
+	require.NoError(t, err)
+	require.Equal(t, []string{"c", "b"}, []string{first.Data[0].ID, first.Data[1].ID})
+	require.True(t, first.HasMore)
+	require.NotEmpty(t, first.NextCursor)
+
+	second, err := paginateConnections(connections, first.NextCursor, 0, 2, true)
+	require.NoError(t, err)
+	require.Len(t, second.Data, 1)
+	require.Equal(t, "a", second.Data[0].ID)
+	require.False(t, second.HasMore)
+
+	_, err = paginateConnections(connections, "invalid", 0, 2, true)
+	require.Error(t, err)
+}
+
+func TestConnectionCursorStableWhenNewItemArrives(t *testing.T) {
+	now := time.Now()
+	connections := []Connection{
+		{ID: "b", ClosedAt: now},
+		{ID: "a", ClosedAt: now.Add(-time.Second)},
+	}
+	first, err := paginateConnections(connections, "", 0, 1, true)
+	require.NoError(t, err)
+	connections = append([]Connection{{ID: "c", ClosedAt: now.Add(time.Second)}}, connections...)
+	second, err := paginateConnections(connections, first.NextCursor, 0, 1, true)
+	require.NoError(t, err)
+	require.Equal(t, "a", second.Data[0].ID)
+}
+
+func TestTopDimensionHeap(t *testing.T) {
+	result := make(dimensionHeap, 0, 2)
+	for _, item := range []Dimension{
+		{Value: "low", Download: 1},
+		{Value: "second", Download: 20},
+		{Value: "first", Upload: 30},
+		{Value: "ignored", Download: 2},
+	} {
+		pushTopDimension(&result, item, 2)
+	}
+	require.ElementsMatch(t, []string{"first", "second"}, []string{result[0].Value, result[1].Value})
+}
+
+func TestCapabilitiesAndStructuredErrors(t *testing.T) {
+	manager := newTestManager(t, true)
+	request := httptest.NewRequest(http.MethodGet, "/capabilities", nil)
+	response := httptest.NewRecorder()
+	manager.Handler().ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	var capabilities Capabilities
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &capabilities))
+	require.True(t, capabilities.CursorPagination)
+	require.False(t, capabilities.EventReplay)
+	require.True(t, capabilities.ExposeSensitive)
+
+	request = httptest.NewRequest(http.MethodGet, "/connections/active?limit=501", nil)
+	response = httptest.NewRecorder()
+	manager.Handler().ServeHTTP(response, request)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	var apiError APIError
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &apiError))
+	require.Equal(t, "invalid_query_parameter", apiError.Error.Code)
+	require.Equal(t, "limit", apiError.Error.Parameter)
+}
+
+func TestObservabilityAPIMetrics(t *testing.T) {
+	manager := newTestManager(t, false)
+	request := httptest.NewRequest(http.MethodGet, "/status", nil)
+	manager.Handler().ServeHTTP(httptest.NewRecorder(), request)
+	request = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+	manager.Handler().ServeHTTP(response, request)
+	require.Contains(t, response.Body.String(), "singbox_observability_http_requests_total{endpoint=\"status\",status=\"200\"} 1")
+	require.Contains(t, response.Body.String(), "singbox_recent_connections_capacity 1000")
+}
+
+func BenchmarkTopDimensionHeap(b *testing.B) {
+	values := make([]Dimension, 100000)
+	for index := range values {
+		values[index] = Dimension{Value: "value", Download: int64(index)}
+	}
+	b.ResetTimer()
+	for range b.N {
+		result := make(dimensionHeap, 0, 100)
+		for _, value := range values {
+			pushTopDimension(&result, value, 100)
+		}
+	}
 }
 
 func newTestManager(t *testing.T, exposeSensitive bool) *Manager {

@@ -60,6 +60,10 @@ type Manager struct {
 	statisticsAccess     sync.RWMutex
 	outboundStatistics   map[string]*outboundStatistics
 	connectionStatistics map[connectionDimension]*connectionStatistics
+	topCacheAccess       sync.Mutex
+	topCache             map[topCacheKey]topCacheEntry
+	recentGeneration     atomic.Uint64
+	apiMetrics           apiMetrics
 	handler              httpHandler
 }
 
@@ -95,6 +99,7 @@ func New(ctx context.Context, logger log.ContextLogger, traffic *trafficcontrol.
 		exposeSensitive:      options.ExposeSensitive,
 		outboundStatistics:   make(map[string]*outboundStatistics),
 		connectionStatistics: make(map[connectionDimension]*connectionStatistics),
+		topCache:             make(map[topCacheKey]topCacheEntry),
 	}
 	manager.handler.manager = manager
 	return manager, nil
@@ -144,6 +149,7 @@ func (m *Manager) ConnectionOpened(metadata trafficcontrol.TrackerMetadata) {
 }
 
 func (m *Manager) ConnectionClosed(metadata trafficcontrol.TrackerMetadata) {
+	m.recentGeneration.Add(1)
 	statistics := m.statisticsFor(outboundName(metadata))
 	statistics.activeConnections.Add(-1)
 	for _, dimension := range connectionDimensions(metadata) {
@@ -185,19 +191,17 @@ func (m *Manager) statisticsForDimension(dimension connectionDimension) *connect
 	return statistics
 }
 
-func (m *Manager) activeConnections() ConnectionPage {
+func (m *Manager) activeConnections(cursor string, limit int) (ConnectionPage, error) {
 	metadata := m.traffic.Connections()
 	connections := make([]Connection, 0, len(metadata))
 	for _, item := range metadata {
 		connections = append(connections, m.connectionFromMetadata(*item))
 	}
-	sort.Slice(connections, func(i, j int) bool {
-		return connections[i].StartedAt.After(connections[j].StartedAt)
-	})
-	return ConnectionPage{Data: connections, Total: len(connections)}
+	sortConnections(connections, false)
+	return paginateConnections(connections, cursor, 0, limit, false)
 }
 
-func (m *Manager) recentConnectionPage(offset int, limit int, window time.Duration) ConnectionPage {
+func (m *Manager) recentConnectionPage(cursor string, offset int, limit int, window time.Duration) (ConnectionPage, error) {
 	if limit <= 0 || limit > m.recentConnections {
 		limit = min(100, m.recentConnections)
 	}
@@ -207,18 +211,16 @@ func (m *Manager) recentConnectionPage(offset int, limit int, window time.Durati
 	window = m.normalizeWindow(window)
 	cutoff := time.Now().Add(-window)
 	metadata := m.traffic.ClosedConnections()
-	page := ConnectionPage{Data: make([]Connection, 0, min(limit, len(metadata)))}
+	connections := make([]Connection, 0, len(metadata))
 	for i := len(metadata) - 1; i >= 0; i-- {
 		item := metadata[i]
 		if item.ClosedAt.Before(cutoff) {
 			break
 		}
-		if page.Total >= offset && len(page.Data) < limit {
-			page.Data = append(page.Data, m.connectionFromMetadata(*item))
-		}
-		page.Total++
+		connections = append(connections, m.connectionFromMetadata(*item))
 	}
-	return page
+	sortConnections(connections, true)
+	return paginateConnections(connections, cursor, offset, limit, true)
 }
 
 func (m *Manager) recentConnectionCount(window time.Duration) int {
@@ -245,6 +247,13 @@ func (m *Manager) topDimensions(name string, window time.Duration, limit int) (D
 		limit = m.topKSize
 	}
 	window = m.normalizeWindow(window)
+	cacheKey := topCacheKey{name: name, window: window, limit: limit, generation: m.recentGeneration.Load()}
+	m.topCacheAccess.Lock()
+	if cached, loaded := m.topCache[cacheKey]; loaded && time.Since(cached.createdAt) < topCacheTTL {
+		m.topCacheAccess.Unlock()
+		return cached.page, nil
+	}
+	m.topCacheAccess.Unlock()
 	cutoff := time.Now().Add(-window)
 	values := make(map[string]*Dimension)
 	metadata := m.traffic.ClosedConnections()
@@ -266,20 +275,18 @@ func (m *Manager) topDimensions(name string, window time.Duration, limit int) (D
 		dimension.Download += item.Download.Load()
 		dimension.Connections++
 	}
-	all := make([]Dimension, 0, len(values))
+	all := make(dimensionHeap, 0, min(limit, len(values)))
 	for _, dimension := range values {
-		all = append(all, *dimension)
+		pushTopDimension(&all, *dimension, limit)
 	}
-	sort.Slice(all, func(i, j int) bool {
-		left := all[i].Upload + all[i].Download
-		right := all[j].Upload + all[j].Download
-		if left == right {
-			return all[i].Value < all[j].Value
-		}
-		return left > right
-	})
-	page := DimensionPage{Dimension: name, Window: window.String(), Total: len(all)}
-	page.Data = all[:min(limit, len(all))]
+	sort.Slice(all, func(i, j int) bool { return dimensionBetter(all[i], all[j]) })
+	page := DimensionPage{Dimension: name, Window: window.String(), Total: len(values), Data: []Dimension(all)}
+	m.topCacheAccess.Lock()
+	if len(m.topCache) >= 64 {
+		clear(m.topCache)
+	}
+	m.topCache[cacheKey] = topCacheEntry{createdAt: time.Now(), page: page}
+	m.topCacheAccess.Unlock()
 	return page, nil
 }
 
@@ -306,6 +313,22 @@ func (m *Manager) status() Status {
 		RecentTTL:             m.recentTTL.String(),
 		TopKSize:              m.topKSize,
 		ExposeSensitive:       m.exposeSensitive,
+	}
+}
+
+func (m *Manager) capabilities() Capabilities {
+	return Capabilities{
+		APIVersion:          1,
+		Endpoints:           []string{"capabilities", "metrics", "status", "connections/active", "connections/recent", "events", "top"},
+		TopDimensions:       []string{"network", "inbound", "outbound", "rule", "domain", "destination_ip", "source", "process", "user"},
+		SensitiveDimensions: []string{"rule", "domain", "destination_ip", "source", "process", "user"},
+		ExposeSensitive:     m.exposeSensitive,
+		RecentLimit:         m.recentConnections,
+		RecentTTL:           m.recentTTL.String(),
+		TopKLimit:           m.topKSize,
+		ActivePageLimit:     MaxActivePageSize,
+		CursorPagination:    true,
+		EventReplay:         false,
 	}
 }
 
@@ -337,7 +360,7 @@ func (m *Manager) streamEvents(ctx context.Context, heartbeat time.Duration, sen
 				eventType = "close"
 			}
 			if event.Metadata != nil {
-				if err = send(&Event{Type: eventType, Connection: m.connectionFromMetadata(*event.Metadata)}); err != nil {
+				if err = send(&Event{ID: event.Sequence, Type: eventType, Connection: m.connectionFromMetadata(*event.Metadata)}); err != nil {
 					return err
 				}
 			}
