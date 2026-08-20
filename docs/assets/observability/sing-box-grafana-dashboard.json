@@ -3041,7 +3041,7 @@
       "gridPos": {
         "x": 0,
         "y": 88,
-        "w": 24,
+        "w": 16,
         "h": 8
       },
       "id": 39,
@@ -3148,6 +3148,118 @@
         }
       ],
       "title": "Runtime Status",
+      "transformations": [],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "${DS_INFINITY}"
+      },
+      "description": "Capabilities reported by the current API. Cursor Pagination must be enabled for this dashboard contract.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 88,
+        "w": 8,
+        "h": 8
+      },
+      "id": 47,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "apiVersion",
+              "text": "API",
+              "type": "number"
+            },
+            {
+              "selector": "cursorPagination",
+              "text": "Cursor",
+              "type": "boolean"
+            },
+            {
+              "selector": "eventReplay",
+              "text": "Replay",
+              "type": "boolean"
+            },
+            {
+              "selector": "exposeSensitive",
+              "text": "Sensitive",
+              "type": "boolean"
+            },
+            {
+              "selector": "activePageLimit",
+              "text": "Active Max",
+              "type": "number"
+            },
+            {
+              "selector": "recentLimit",
+              "text": "Recent Max",
+              "type": "number"
+            },
+            {
+              "selector": "topKLimit",
+              "text": "Top-K Max",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "${DS_INFINITY}"
+          },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "parser": "backend",
+          "refId": "A",
+          "root_selector": "[$]",
+          "source": "url",
+          "type": "json",
+          "url": "/capabilities",
+          "url_options": {
+            "data": "",
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "API Capabilities",
       "transformations": [],
       "type": "table"
     },
@@ -3363,7 +3475,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "${DS_INFINITY}"
       },
-      "description": "Closed connections retained in the bounded in-memory ring. Adjust API Window and Recent Rows above.",
+      "description": "First cursor page of closed connections retained in the bounded in-memory ring. Adjust API Window and Recent Rows above.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3559,7 +3671,7 @@
           "root_selector": "data",
           "source": "url",
           "type": "json",
-          "url": "/connections/recent?window=$api_window&limit=$recent_limit&offset=0",
+          "url": "/connections/recent?window=$api_window&limit=$recent_limit",
           "url_options": {
             "data": "",
             "method": "GET"
