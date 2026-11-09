@@ -29,7 +29,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: 1.26.10
+          go-version: stable
       - name: Check input version
         if: github.event_name == 'workflow_dispatch'
         run: |-
@@ -51,19 +51,7 @@ jobs:
     strategy:
       matrix:
         include:
-          # Naive-enabled builds (musl)
-          - { os: linux, arch: amd64, naive: true, debian: amd64, rpm: x86_64, pacman: x86_64 }
-          - { os: linux, arch: arm64, naive: true, debian: arm64, rpm: aarch64, pacman: aarch64 }
-          - { os: linux, arch: "386", naive: true, debian: i386, rpm: i386 }
-          - { os: linux, arch: arm, goarm: "7", naive: true, debian: armhf, rpm: armv7hl, pacman: armv7hl }
-          - { os: linux, arch: mipsle, gomips: softfloat, naive: true, debian: mipsel, rpm: mipsel }
-          - { os: linux, arch: riscv64, naive: true, debian: riscv64, rpm: riscv64 }
-          - { os: linux, arch: loong64, naive: true, debian: loongarch64, rpm: loongarch64 }
-          # Non-naive builds (unsupported architectures)
-          - { os: linux, arch: arm, goarm: "6", debian: armel, rpm: armv6hl }
-          - { os: linux, arch: mips64le, debian: mips64el, rpm: mips64el }
-          - { os: linux, arch: s390x, debian: s390x, rpm: s390x }
-          - { os: linux, arch: ppc64le, debian: ppc64el, rpm: ppc64le }
+          - { os: linux, arch: amd64, naive: false }
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -72,7 +60,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: 1.26.10
+          go-version: stable
       - name: Clone cronet-go
         if: matrix.naive
         run: |
@@ -120,13 +108,7 @@ jobs:
           git tag v${{ needs.calculate_version.outputs.version }} -f
       - name: Set build tags
         run: |
-          set -xeuo pipefail
-          if [[ "${{ matrix.naive }}" == "true" ]]; then
-            TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_musl"
-          else
-            TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
-          fi
-          echo "BUILD_TAGS=${TAGS}" >> "${GITHUB_ENV}"
+          echo "BUILD_TAGS=with_ebpf,with_quic,with_xhttp,with_clash_api,with_tailscale,badlinkname,tfogo_checklinkname0" >> "${GITHUB_ENV}"
       - name: Set shared ldflags
         run: |
           echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "${GITHUB_ENV}"
@@ -163,54 +145,6 @@ jobs:
       - name: Set mtime
         run: |-
           TZ=UTC touch -t '197001010000' dist/sing-box
-      - name: Detect track
-        run: bash .github/detect_track.sh
-      - name: Set version
-        run: |-
-          PKG_VERSION="${{ needs.calculate_version.outputs.version }}"
-          PKG_VERSION="${PKG_VERSION//-/\~}"
-          echo "PKG_VERSION=${PKG_VERSION}" >> "${GITHUB_ENV}"
-      - name: Package DEB
-        if: matrix.debian != ''
-        run: |
-          set -xeuo pipefail
-          sudo gem install fpm
-          sudo apt-get install -y debsigs
-          cp .fpm_systemd .fpm
-          fpm -t deb \
-            --name "${NAME}" \
-            -v "$PKG_VERSION" \
-            -p "dist/${NAME}_${{ needs.calculate_version.outputs.version }}_linux_${{ matrix.debian }}.deb" \
-            --architecture ${{ matrix.debian }} \
-            dist/sing-box=/usr/bin/sing-box
-          rm -rf $HOME/.gnupg
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
-      - name: Package RPM
-        if: matrix.rpm != ''
-        run: |-
-          set -xeuo pipefail
-          sudo gem install fpm
-          echo '%_rpmformat 4' > "$HOME/.rpmmacros"
-          cp .fpm_systemd .fpm
-          fpm -t rpm \
-            --name "${NAME}" \
-            -v "$PKG_VERSION" \
-            -p "dist/${NAME}_${{ needs.calculate_version.outputs.version }}_linux_${{ matrix.rpm }}.rpm" \
-            --architecture ${{ matrix.rpm }} \
-            dist/sing-box=/usr/bin/sing-box
-          cat > $HOME/.rpmmacros <<EOF
-          %_gpg_name ${{ secrets.GPG_KEY_ID }}
-          %_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${{ secrets.GPG_PASSPHRASE }}
-          EOF
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          rpmsign --addsign dist/*.rpm
-      - name: Cleanup
-        run: rm dist/sing-box
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
